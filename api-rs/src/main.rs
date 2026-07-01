@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.embedding_max_tokens,
         embedding,
         dream_enabled,
-        honcho_api_rs::dialectic_config::DialecticSettings::default(),
+        honcho_api_rs::dialectic_config::DialecticSettings::from_env(),
         llm_keys,
     ));
 

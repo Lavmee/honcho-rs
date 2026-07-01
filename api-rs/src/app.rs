@@ -1413,9 +1413,29 @@ async fn chat(
         return Err(AuthError::PermissionDenied.into());
     }
 
-    if body.query.trim().is_empty() {
+    // Body validation, mirroring Pydantic `DialecticOptions`: `query` has
+    // min_length=1 / max_length=10000 (checked on the raw string — whitespace-only
+    // passes), then the after-validator strips NUL bytes.
+    if body.query.is_empty() {
         return Err(ApiError::Validation("query is required".to_string()));
     }
+    if body.query.chars().count() > 10_000 {
+        return Err(ApiError::Validation(
+            "query must be at most 10000 characters".to_string(),
+        ));
+    }
+    let query = body.query.replace('\0', "");
+
+    // An invalid reasoning_level is a 422 (Pydantic enum validation); only an
+    // absent field falls back to the "low" default.
+    let level = match body.reasoning_level.as_deref() {
+        None => crate::dialectic_config::ReasoningLevel::Low,
+        Some(raw) => crate::dialectic_config::ReasoningLevel::parse(raw).ok_or_else(|| {
+            ApiError::Validation(format!(
+                "Invalid reasoning_level '{raw}'. Must be one of: minimal, low, medium, high, max"
+            ))
+        })?,
+    };
 
     // Ensure the observer peer exists (Python's chat `get_or_create_peers`,
     // observer only). This is a write, so it runs only when writes are enabled;
@@ -1424,22 +1444,33 @@ async fn chat(
         db::get_or_create_peer(state.pool()?, &workspace_id, &peer_id, None, None).await?;
     }
 
-    let level = body
-        .reasoning_level
-        .as_deref()
-        .and_then(crate::dialectic_config::ReasoningLevel::parse)
-        .unwrap_or(crate::dialectic_config::ReasoningLevel::Low);
     let observed = body.target.clone().unwrap_or_else(|| peer_id.clone());
     let pool = state.pool()?;
+
+    // Python's dialectic preflight (`agentic_chat` → crud.get_peer) 404s when
+    // the observed/target peer does not exist. The observer was just
+    // get-or-created above.
+    if observed != peer_id && !db::peer_exists(pool, &workspace_id, &observed).await? {
+        return Err(ApiError::NotFound(format!(
+            "Peer {observed} not found in workspace {workspace_id}"
+        )));
+    }
 
     // Resolve peer-card injection (Python's dialectic preflight): merge the
     // workspace + session configuration over defaults, and when `peer_card.use`
     // is set, load the observer's self-card and its card of the observed peer.
+    // A body session_id naming a nonexistent session is a 404 (Python's
+    // crud.get_session raise).
     let workspace_config = db::get_workspace_configuration(pool, &workspace_id).await?;
     let session_config = match body.session_id.as_deref() {
-        Some(session) => db::fetch_session_for_enqueue(pool, &workspace_id, session)
-            .await?
-            .map(|(_, config)| config),
+        Some(session) => match db::fetch_session_for_enqueue(pool, &workspace_id, session).await? {
+            Some((_, config)) => Some(config),
+            None => {
+                return Err(ApiError::NotFound(format!(
+                    "Session {session} not found in workspace {workspace_id}"
+                )));
+            }
+        },
         None => None,
     };
     let configuration =
@@ -1494,7 +1525,7 @@ async fn chat(
             &observed,
             observer_card.as_deref(),
             observed_card.as_deref(),
-            &body.query,
+            &query,
             level,
         )
         .await
@@ -1514,7 +1545,7 @@ async fn chat(
         &observed,
         observer_card.as_deref(),
         observed_card.as_deref(),
-        &body.query,
+        &query,
         level,
     )
     .await

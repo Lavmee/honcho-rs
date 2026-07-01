@@ -1663,7 +1663,54 @@ async fn chat_rejects_empty_query_with_422() {
         .oneshot(
             Request::post("/v3/workspaces/ws/peers/alice/chat")
                 .header("content-type", "application/json")
+                .body(Body::from(json!({"query": ""}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn chat_accepts_whitespace_only_query() {
+    // Pydantic's min_length=1 counts raw characters, so "   " passes validation
+    // (it proceeds to the agent; this no-pool harness then surfaces 500).
+    let response = build_router(no_auth_state())
+        .oneshot(
+            Request::post("/v3/workspaces/ws/peers/alice/chat")
+                .header("content-type", "application/json")
                 .body(Body::from(json!({"query": "   "}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn chat_rejects_overlong_query_with_422() {
+    let response = build_router(no_auth_state())
+        .oneshot(
+            Request::post("/v3/workspaces/ws/peers/alice/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"query": "x".repeat(10_001)}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn chat_rejects_invalid_reasoning_level_with_422() {
+    let response = build_router(no_auth_state())
+        .oneshot(
+            Request::post("/v3/workspaces/ws/peers/alice/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"query": "hi", "reasoning_level": "ultra"}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
