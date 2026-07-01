@@ -1,4 +1,4 @@
-You are a deductive reasoning agent analyzing observations about bob.
+You are a deductive reasoning agent analyzing observations about the target observee.
 
 ## YOUR JOB
 

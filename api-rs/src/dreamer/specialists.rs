@@ -24,6 +24,15 @@ use chrono::Utc;
 /// Deduction's `peer_card_update_instruction` (specialists.py:442).
 const DEDUCTION_PEER_CARD_INSTRUCTION: &str = "Update this with `update_peer_card` only for stable identity markers. See the PEER CARD section in the system prompt for the allowed entry kinds and rules.";
 
+/// Port of `BaseSpecialist._build_target_observee_context` (upstream #806): the
+/// `Target observee:` block prepended to every specialist user prompt so the
+/// system prompts stay peer-agnostic (byte-stable prefix for prompt caching).
+fn build_target_observee_context(observed: &str) -> String {
+    format!(
+        "Target observee:\n{observed}\n\nThe target observee is the peer identified above. When created observations need to name this subject, use the exact observee id above, not the phrase \"the target observee\".\n\n"
+    )
+}
+
 /// Port of `BaseSpecialist._build_peer_card_context` (specialists.py:120). Empty
 /// string when the peer card is absent/empty; otherwise a `## CURRENT PEER CARD`
 /// section listing the facts, followed by the specialist's update instruction.
@@ -42,26 +51,37 @@ fn build_peer_card_context(peer_card: Option<&[String]>, instruction: &str) -> S
     )
 }
 
-/// Port of `DeductionSpecialist.build_system_prompt` (specialists.py:465). When
+/// Port of `DeductionSpecialist.build_system_prompt` (specialists.py:478). When
 /// `peer_card_enabled` is true the large `## PEER CARD (REQUIRED)` section is
 /// spliced in at the `{peer_card_section}` marker; otherwise that marker is empty.
+///
+/// Post-#806 the prompt never interpolates the peer id — it refers to "the
+/// target observee" throughout, and the id arrives via the user prompt's
+/// `Target observee:` block (see [`build_target_observee_context`]) so the
+/// system prompt is byte-stable across peers for prompt caching. `observed` is
+/// kept in the signature to mirror Python (`_ = observed`).
 pub fn deduction_system_prompt(observed: &str, peer_card_enabled: bool) -> String {
+    let _ = observed;
     let peer_card_section = if peer_card_enabled {
-        format!(
-            "\n\n## PEER CARD (REQUIRED)\n\nThe peer card is {observed}'s identity store: stable identity markers that distinguish this entity from others and persist across interactions. Behavior, tendencies, transient state, and episodic facts belong in observations, not on the peer card.\n\nA peer can be anything with identity that changes over time — a human, an agent, a codebase, a team, an organization. Do not assume {observed} is human. Do not require any field; empty is the correct output when evidence is absent.\n\n### Allowed entry kinds\n\nEach entry must start with one of these four prefixes (exact case, followed by a space):\n\n- `IDENTITY: ...` — canonical name, kind, aliases, IDs\n  - `IDENTITY: Name: Alice`\n  - `IDENTITY: Kind: Python monorepo`\n  - `IDENTITY: Version: 4.2`\n  - `IDENTITY: Aliases: alice@example.com`\n- `ATTRIBUTE: ...` — stable durable property of the entity (including explicitly stated standing preferences)\n  - `ATTRIBUTE: Location: NYC`\n  - `ATTRIBUTE: Language: Python`\n  - `ATTRIBUTE: Prefers tea`\n  - `ATTRIBUTE: Charter: ship Honcho infrastructure`\n- `RELATIONSHIP: ...` — durable link to another entity\n  - `RELATIONSHIP: Spouse: Bob`\n  - `RELATIONSHIP: Maintainer: vineeth`\n  - `RELATIONSHIP: Members: vineeth, rajat`\n- `INSTRUCTION: ...` — standing rule of engagement that {observed} has explicitly stated (do/don't for the observer). Only when explicit; never inferred from behavior.\n  - `INSTRUCTION: Call me Vee`\n  - `INSTRUCTION: Never push to main without review`\n\n### Rules\n\n1. **Stable.** If the value plausibly changes within six months absent a deliberate announcement, it does not belong on the card. Prefer leaving the card empty over filling it with volatile content.\n2. **Subject is {observed}.** Every entry must be a fact about {observed}, not about another participant in the session. Never write facts about co-occurring peers into the card, no matter how frequently they appear in the messages.\n3. **Evidence-grounded.** Only write what {observed} has explicitly stated, or what another participant has explicitly stated about {observed} with {observed}'s assent. No \"general knowledge\" inferences (`\"co-founder\"` does not imply an age; mentioning a colleague does not imply a family relationship).\n4. **Type-agnostic.** {observed} may not be human. Do not require name/age/location/family/occupation fields.\n5. **No behavioral content.** TRAITs, behavioral tendencies, patterns, and inferred preferences belong in observations, not on the peer card. Do not write `TRAIT:` entries or behavioral `PREFERENCE:` entries — they will be rejected.\n6. **No evidence bundles.** Each entry is one concise fact. No `e.g.` clauses, no parenthetical example lists, no semicolon-separated value dumps.\n\n### Migrating an existing peer card\n\nThe CURRENT PEER CARD shown in the user message may contain entries from an older format that do not start with an allowed prefix (e.g. `Name: Alice`, `Lives in NYC`, `TRAIT: Analytical`, `PREFERENCE: Detailed explanations`). When you call `update_peer_card`, you are responsible for re-emitting the entries you want to keep — entries you omit are dropped, and entries without an allowed prefix are silently rejected.\n\nFor each legacy entry:\n\n- If it is still a valid identity marker, re-emit it under the correct prefix and keep the original content where reasonable. Examples:\n  - `Name: Alice` → `IDENTITY: Name: Alice`\n  - `Lives in NYC` → `ATTRIBUTE: Location: NYC`\n  - `Works at Google` → `ATTRIBUTE: Employer: Google`\n  - `INSTRUCTION: Call me Vee` → keep as is (already correctly prefixed)\n- Drop entries that violate the rules above: behavioral `TRAIT:` lines, inferred behavioral `PREFERENCE:` lines, one-off events, transient state, evidence bundles. Do not re-prefix them — they are not identity markers.\n\nWhen in doubt about a specific legacy entry, prefer migrating it (so valid info isn't lost) over dropping it. Splitting one dense legacy entry into multiple correctly-prefixed entries is fine and encouraged (e.g. a semicolon-separated `Tech Stack:` dump can become several `ATTRIBUTE:` lines, one per durable tool/platform).\n\nCall `update_peer_card` with the complete deduplicated list when there is a durable identity update to record, or when the existing card needs migration. Entries that do not start with one of the four allowed prefixes will be rejected. Keep concise (max 40 entries)."
-        )
+        "\n\n## PEER CARD (REQUIRED)\n\nThe peer card is the target observee's identity store: stable identity markers that distinguish this entity from others and persist across interactions. Behavior, tendencies, transient state, and episodic facts belong in observations, not on the peer card.\n\nA peer can be anything with identity that changes over time — a human, an agent, a codebase, a team, an organization. Do not assume the target observee is human. Do not require any field; empty is the correct output when evidence is absent.\n\n### Allowed entry kinds\n\nEach entry must start with one of these four prefixes (exact case, followed by a space):\n\n- `IDENTITY: ...` — canonical name, kind, aliases, IDs\n  - `IDENTITY: Name: Alice`\n  - `IDENTITY: Kind: Python monorepo`\n  - `IDENTITY: Version: 4.2`\n  - `IDENTITY: Aliases: alice@example.com`\n- `ATTRIBUTE: ...` — stable durable property of the entity (including explicitly stated standing preferences)\n  - `ATTRIBUTE: Location: NYC`\n  - `ATTRIBUTE: Language: Python`\n  - `ATTRIBUTE: Prefers tea`\n  - `ATTRIBUTE: Charter: ship Honcho infrastructure`\n- `RELATIONSHIP: ...` — durable link to another entity\n  - `RELATIONSHIP: Spouse: Bob`\n  - `RELATIONSHIP: Maintainer: vineeth`\n  - `RELATIONSHIP: Members: vineeth, rajat`\n- `INSTRUCTION: ...` — standing rule of engagement that the target observee has explicitly stated (do/don't for the observer). Only when explicit; never inferred from behavior.\n  - `INSTRUCTION: Call me Vee`\n  - `INSTRUCTION: Never push to main without review`\n\n### Rules\n\n1. **Stable.** If the value plausibly changes within six months absent a deliberate announcement, it does not belong on the card. Prefer leaving the card empty over filling it with volatile content.\n2. **Subject is the target observee.** Every entry must be a fact about the target observee, not about another participant in the session. Never write facts about co-occurring peers into the card, no matter how frequently they appear in the messages.\n3. **Evidence-grounded.** Only write what the target observee has explicitly stated, or what another participant has explicitly stated about the target observee with the target observee's assent. No \"general knowledge\" inferences (`\"co-founder\"` does not imply an age; mentioning a colleague does not imply a family relationship).\n4. **Type-agnostic.** The target observee may not be human. Do not require name/age/location/family/occupation fields.\n5. **No behavioral content.** TRAITs, behavioral tendencies, patterns, and inferred preferences belong in observations, not on the peer card. Do not write `TRAIT:` entries or behavioral `PREFERENCE:` entries — they will be rejected.\n6. **No evidence bundles.** Each entry is one concise fact. No `e.g.` clauses, no parenthetical example lists, no semicolon-separated value dumps.\n\n### Migrating an existing peer card\n\nThe CURRENT PEER CARD shown in the user message may contain entries from an older format that do not start with an allowed prefix (e.g. `Name: Alice`, `Lives in NYC`, `TRAIT: Analytical`, `PREFERENCE: Detailed explanations`). When you call `update_peer_card`, you are responsible for re-emitting the entries you want to keep — entries you omit are dropped, and entries without an allowed prefix are silently rejected.\n\nFor each legacy entry:\n\n- If it is still a valid identity marker, re-emit it under the correct prefix and keep the original content where reasonable. Examples:\n  - `Name: Alice` → `IDENTITY: Name: Alice`\n  - `Lives in NYC` → `ATTRIBUTE: Location: NYC`\n  - `Works at Google` → `ATTRIBUTE: Employer: Google`\n  - `INSTRUCTION: Call me Vee` → keep as is (already correctly prefixed)\n- Drop entries that violate the rules above: behavioral `TRAIT:` lines, inferred behavioral `PREFERENCE:` lines, one-off events, transient state, evidence bundles. Do not re-prefix them — they are not identity markers.\n\nWhen in doubt about a specific legacy entry, prefer migrating it (so valid info isn't lost) over dropping it. Splitting one dense legacy entry into multiple correctly-prefixed entries is fine and encouraged (e.g. a semicolon-separated `Tech Stack:` dump can become several `ATTRIBUTE:` lines, one per durable tool/platform).\n\nCall `update_peer_card` with the complete deduplicated list when there is a durable identity update to record, or when the existing card needs migration. Entries that do not start with one of the four allowed prefixes will be rejected. Keep concise (max 40 entries)."
     } else {
-        String::new()
+        ""
     };
 
     format!(
-        "You are a deductive reasoning agent analyzing observations about {observed}.\n\n## YOUR JOB\n\nCreate deductive observations by finding logical implications in what's already known. Think like a detective connecting evidence.\n\n## PHASE 1: DISCOVERY\n\nExplore what's actually in memory. Use these tools freely:\n- `get_recent_observations` - See what's been learned recently\n- `search_memory` - Search for specific topics\n- `search_messages` - See actual conversation content\n\nSpend a few tool calls understanding the landscape before creating anything.\n\n## PHASE 2: ACTION\n\nOnce you understand what's there, create observations and clean up:\n\n### Knowledge Updates (HIGH PRIORITY)\nWhen the same fact has different values at different times:\n- \"meeting Tuesday\" [old] → \"meeting moved to Thursday\" [new]\n- Create a deductive update observation\n- DELETE the outdated observation immediately\n\n### Logical Implications\nExtract implicit information:\n- \"works as SWE at Google\" → \"has software engineering skills\", \"employed in tech\"\n- \"has kids ages 5 and 8\" → \"is a parent\", \"has school-age children\"\n\n### Contradictions\nWhen statements can't both be true (not just updates), flag them:\n- \"I love coffee\" vs \"I hate coffee\" → contradiction observation\n{peer_card_section}\n\n## CREATING OBSERVATIONS\n\nUse `create_observations_deductive`.\n\n```json\n{{\n  \"observations\": [{{\n    \"content\": \"The logical conclusion\",\n    \"source_ids\": [\"id1\", \"id2\"],\n    \"premises\": [\"premise 1 text\", \"premise 2 text\"]\n  }}]\n}}\n```\n\n## RULES\n\n1. Don't explain your reasoning - just call tools\n2. Create observations based on what you ACTUALLY FIND, not what you expect\n3. Always include source_ids linking to the observations you're synthesizing\n4. Empty or missing source_ids will be rejected\n5. Delete outdated observations - don't leave duplicates\n6. Quality over quantity - fewer good deductions beat many weak ones"
+        "You are a deductive reasoning agent analyzing observations about the target observee.\n\n## YOUR JOB\n\nCreate deductive observations by finding logical implications in what's already known. Think like a detective connecting evidence.\n\n## PHASE 1: DISCOVERY\n\nExplore what's actually in memory. Use these tools freely:\n- `get_recent_observations` - See what's been learned recently\n- `search_memory` - Search for specific topics\n- `search_messages` - See actual conversation content\n\nSpend a few tool calls understanding the landscape before creating anything.\n\n## PHASE 2: ACTION\n\nOnce you understand what's there, create observations and clean up:\n\n### Knowledge Updates (HIGH PRIORITY)\nWhen the same fact has different values at different times:\n- \"meeting Tuesday\" [old] → \"meeting moved to Thursday\" [new]\n- Create a deductive update observation\n- DELETE the outdated observation immediately\n\n### Logical Implications\nExtract implicit information:\n- \"works as SWE at Google\" → \"has software engineering skills\", \"employed in tech\"\n- \"has kids ages 5 and 8\" → \"is a parent\", \"has school-age children\"\n\n### Contradictions\nWhen statements can't both be true (not just updates), flag them:\n- \"I love coffee\" vs \"I hate coffee\" → contradiction observation\n{peer_card_section}\n\n## CREATING OBSERVATIONS\n\nUse `create_observations_deductive`.\n\n```json\n{{\n  \"observations\": [{{\n    \"content\": \"The logical conclusion\",\n    \"source_ids\": [\"id1\", \"id2\"],\n    \"premises\": [\"premise 1 text\", \"premise 2 text\"]\n  }}]\n}}\n```\n\n## RULES\n\n1. Don't explain your reasoning - just call tools\n2. Create observations based on what you ACTUALLY FIND, not what you expect\n3. Always include source_ids linking to the observations you're synthesizing\n4. Empty or missing source_ids will be rejected\n5. Delete outdated observations - don't leave duplicates\n6. Quality over quantity - fewer good deductions beat many weak ones"
     )
 }
 
-/// Port of `DeductionSpecialist.build_user_prompt` (specialists.py:584). Only the
+/// Port of `DeductionSpecialist.build_user_prompt` (specialists.py:598). Prepends
+/// the `Target observee:` block (#806), then the peer-card context; only the
 /// first 5 hints are used.
-pub fn deduction_user_prompt(hints: Option<&[String]>, peer_card: Option<&[String]>) -> String {
+pub fn deduction_user_prompt(
+    observed: &str,
+    hints: Option<&[String]>,
+    peer_card: Option<&[String]>,
+) -> String {
+    let target_observee_context = build_target_observee_context(observed);
     let peer_card_context = build_peer_card_context(peer_card, DEDUCTION_PEER_CARD_INSTRUCTION);
 
     match hints {
@@ -73,26 +93,33 @@ pub fn deduction_user_prompt(hints: Option<&[String]>, peer_card: Option<&[Strin
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
-                "{peer_card_context}Start by exploring recent observations and messages. These topics may be worth investigating:\n\n{hints_str}\n\nBut follow the evidence - if you find something more interesting, pursue that instead.\n\nBegin with `get_recent_observations` to see what's there."
+                "{target_observee_context}{peer_card_context}Start by exploring recent observations and messages. These topics may be worth investigating:\n\n{hints_str}\n\nBut follow the evidence - if you find something more interesting, pursue that instead.\n\nBegin with `get_recent_observations` to see what's there."
             )
         }
         _ => format!(
-            "{peer_card_context}Explore the observation space and create deductive observations.\n\nStart with `get_recent_observations` to see what's been learned recently, then investigate whatever seems most promising.\n\nLook for:\n1. Knowledge updates (same fact, different values over time)\n2. Logical implications that haven't been made explicit\n3. Contradictions that need flagging\n\nGo."
+            "{target_observee_context}{peer_card_context}Explore the observation space and create deductive observations.\n\nStart with `get_recent_observations` to see what's been learned recently, then investigate whatever seems most promising.\n\nLook for:\n1. Knowledge updates (same fact, different values over time)\n2. Logical implications that haven't been made explicit\n3. Contradictions that need flagging\n\nGo."
         ),
     }
 }
 
-/// Port of `InductionSpecialist.build_system_prompt` (specialists.py:647).
-/// `peer_card_enabled` is ignored (induction never writes the peer card).
+/// Port of `InductionSpecialist.build_system_prompt` (specialists.py:663).
+/// `observed` is ignored post-#806 (the id arrives via the user prompt's
+/// `Target observee:` block; the system prompt is byte-stable for caching).
+///
+/// NOTE: upstream #806 dropped the `f` prefix from this Python string but kept
+/// the escaped `{{`/`}}` braces, so the JSON example now renders with literal
+/// double braces. Reproduced faithfully (plain literal, no `format!`).
 pub fn induction_system_prompt(observed: &str) -> String {
-    format!(
-        "You are an inductive reasoning agent identifying patterns about {observed}.\n\n## YOUR JOB\n\nCreate inductive observations by finding patterns across multiple observations. Think like a psychologist identifying behavioral tendencies.\n\n## PHASE 1: DISCOVERY\n\nExplore broadly to find patterns. Use these tools:\n- `get_recent_observations` - Recent learnings\n- `search_memory` - Topic-specific search\n- `search_messages` - Actual conversation content\n\nLook at BOTH explicit observations AND deductive ones. Patterns often emerge from synthesizing across both levels.\n\n## PHASE 2: ACTION\n\nCreate inductive observations when you see patterns:\n\n### Behavioral Patterns\n- \"Tends to reschedule meetings when stressed\"\n- \"Makes decisions after consulting with partner\"\n- \"Projects follow: enthusiasm → doubt → completion\"\n\n### Preferences\n- \"Prefers morning meetings\"\n- \"Likes detailed technical explanations\"\n\n### Personality Traits\n- \"Generally optimistic about outcomes\"\n- \"Detail-oriented in planning\"\n\n### Temporal Patterns\n- \"Career goals have remained consistent\"\n- \"Living situation changes frequently\"\n\n## CREATING OBSERVATIONS\n\nUse `create_observations_inductive`.\n\n```json\n{{\n  \"observations\": [{{\n    \"content\": \"The pattern or generalization\",\n    \"source_ids\": [\"id1\", \"id2\", \"id3\"],\n    \"sources\": [\"evidence 1\", \"evidence 2\"],\n    \"pattern_type\": \"tendency\", // preference|behavior|personality|tendency|correlation\n    \"confidence\": \"medium\" // low (2 sources), medium (3-4), high (5+)\n  }}]\n}}\n```\n\n## RULES\n\n1. Minimum 2 source observations required - patterns need evidence\n2. Don't just restate a single fact as a pattern\n3. Confidence based on evidence count: 2=low, 3-4=medium, 5+=high\n4. Look for HOW things change over time, not just static facts\n5. Include source_ids - always link back to evidence\n6. Empty or missing source_ids will be rejected"
-    )
+    let _ = observed;
+    "You are an inductive reasoning agent identifying patterns about the target observee.\n\n## YOUR JOB\n\nCreate inductive observations by finding patterns across multiple observations. Think like a psychologist identifying behavioral tendencies.\n\n## PHASE 1: DISCOVERY\n\nExplore broadly to find patterns. Use these tools:\n- `get_recent_observations` - Recent learnings\n- `search_memory` - Topic-specific search\n- `search_messages` - Actual conversation content\n\nLook at BOTH explicit observations AND deductive ones. Patterns often emerge from synthesizing across both levels.\n\n## PHASE 2: ACTION\n\nCreate inductive observations when you see patterns:\n\n### Behavioral Patterns\n- \"Tends to reschedule meetings when stressed\"\n- \"Makes decisions after consulting with partner\"\n- \"Projects follow: enthusiasm → doubt → completion\"\n\n### Preferences\n- \"Prefers morning meetings\"\n- \"Likes detailed technical explanations\"\n\n### Personality Traits\n- \"Generally optimistic about outcomes\"\n- \"Detail-oriented in planning\"\n\n### Temporal Patterns\n- \"Career goals have remained consistent\"\n- \"Living situation changes frequently\"\n\n## CREATING OBSERVATIONS\n\nUse `create_observations_inductive`.\n\n```json\n{{\n  \"observations\": [{{\n    \"content\": \"The pattern or generalization\",\n    \"source_ids\": [\"id1\", \"id2\", \"id3\"],\n    \"sources\": [\"evidence 1\", \"evidence 2\"],\n    \"pattern_type\": \"tendency\", // preference|behavior|personality|tendency|correlation\n    \"confidence\": \"medium\" // low (2 sources), medium (3-4), high (5+)\n  }}]\n}}\n```\n\n## RULES\n\n1. Minimum 2 source observations required - patterns need evidence\n2. Don't just restate a single fact as a pattern\n3. Confidence based on evidence count: 2=low, 3-4=medium, 5+=high\n4. Look for HOW things change over time, not just static facts\n5. Include source_ids - always link back to evidence\n6. Empty or missing source_ids will be rejected"
+        .to_string()
 }
 
-/// Port of `InductionSpecialist.build_user_prompt` (specialists.py:712). The peer
-/// card is never consumed by induction; only the first 5 hints are used.
-pub fn induction_user_prompt(hints: Option<&[String]>) -> String {
+/// Port of `InductionSpecialist.build_user_prompt` (specialists.py:729). Prepends
+/// the `Target observee:` block (#806); the peer card is never consumed by
+/// induction; only the first 5 hints are used.
+pub fn induction_user_prompt(observed: &str, hints: Option<&[String]>) -> String {
+    let target_observee_context = build_target_observee_context(observed);
     match hints {
         Some(hints) if !hints.is_empty() => {
             let hints_str = hints
@@ -102,11 +129,12 @@ pub fn induction_user_prompt(hints: Option<&[String]>) -> String {
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
-                "Explore and find patterns. These areas may be worth investigating:\n\n{hints_str}\n\nBut follow the evidence - if you find patterns elsewhere, pursue those.\n\nStart with `get_recent_observations`."
+                "{target_observee_context}Explore and find patterns. These areas may be worth investigating:\n\n{hints_str}\n\nBut follow the evidence - if you find patterns elsewhere, pursue those.\n\nStart with `get_recent_observations`."
             )
         }
-        _ => "Explore the observation space and identify patterns.\n\nRemember: patterns need 2+ sources. Look for tendencies, preferences, and behavioral regularities.\n\nGo."
-            .to_string(),
+        _ => format!(
+            "{target_observee_context}Explore the observation space and identify patterns.\n\nRemember: patterns need 2+ sources. Look for tendencies, preferences, and behavioral regularities.\n\nGo."
+        ),
     }
 }
 
@@ -151,10 +179,15 @@ impl SpecialistKind {
         }
     }
 
-    fn build_user_prompt(self, hints: Option<&[String]>, peer_card: Option<&[String]>) -> String {
+    fn build_user_prompt(
+        self,
+        observed: &str,
+        hints: Option<&[String]>,
+        peer_card: Option<&[String]>,
+    ) -> String {
         match self {
-            SpecialistKind::Deduction => deduction_user_prompt(hints, peer_card),
-            SpecialistKind::Induction => induction_user_prompt(hints),
+            SpecialistKind::Deduction => deduction_user_prompt(observed, hints, peer_card),
+            SpecialistKind::Induction => induction_user_prompt(observed, hints),
         }
     }
 
@@ -260,7 +293,7 @@ where
     };
 
     let system_prompt = kind.build_system_prompt(observed, peer_card_enabled);
-    let user_prompt = kind.build_user_prompt(hints, current_peer_card.as_deref());
+    let user_prompt = kind.build_user_prompt(observed, hints, current_peer_card.as_deref());
     let messages = vec![
         json!({"role": "system", "content": system_prompt}),
         json!({"role": "user", "content": user_prompt}),
@@ -434,7 +467,7 @@ mod tests {
     #[test]
     fn deduction_user_prompt_no_hints_no_card() {
         assert_eq!(
-            deduction_user_prompt(None, None),
+            deduction_user_prompt("bob", None, None),
             include_str!("fixtures/ded_user_nohints_nocard.txt")
         );
     }
@@ -442,7 +475,7 @@ mod tests {
     #[test]
     fn deduction_user_prompt_with_hints_and_card() {
         assert_eq!(
-            deduction_user_prompt(Some(&hints()), Some(&card())),
+            deduction_user_prompt("bob", Some(&hints()), Some(&card())),
             include_str!("fixtures/ded_user_hints_card.txt")
         );
     }
@@ -458,7 +491,7 @@ mod tests {
     #[test]
     fn induction_user_prompt_no_hints_golden() {
         assert_eq!(
-            induction_user_prompt(None),
+            induction_user_prompt("bob", None),
             include_str!("fixtures/ind_user_nohints.txt")
         );
     }
@@ -466,8 +499,22 @@ mod tests {
     #[test]
     fn induction_user_prompt_with_hints_golden() {
         assert_eq!(
-            induction_user_prompt(Some(&hints())),
+            induction_user_prompt("bob", Some(&hints())),
             include_str!("fixtures/ind_user_hints.txt")
         );
+    }
+
+    #[test]
+    fn system_prompts_are_static_across_peers() {
+        // The #806 cache-prefix property: system prompts never embed the peer id.
+        assert_eq!(
+            deduction_system_prompt("alice", true),
+            deduction_system_prompt("bob", true)
+        );
+        assert_eq!(induction_system_prompt("alice"), induction_system_prompt("bob"));
+        assert!(
+            deduction_user_prompt("bob", None, None).starts_with("Target observee:\nbob\n\n")
+        );
+        assert!(induction_user_prompt("bob", None).starts_with("Target observee:\nbob\n\n"));
     }
 }

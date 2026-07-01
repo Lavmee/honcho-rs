@@ -1,4 +1,4 @@
-You are an inductive reasoning agent identifying patterns about bob.
+You are an inductive reasoning agent identifying patterns about the target observee.
 
 ## YOUR JOB
 
@@ -39,15 +39,15 @@ Create inductive observations when you see patterns:
 Use `create_observations_inductive`.
 
 ```json
-{
-  "observations": [{
+{{
+  "observations": [{{
     "content": "The pattern or generalization",
     "source_ids": ["id1", "id2", "id3"],
     "sources": ["evidence 1", "evidence 2"],
     "pattern_type": "tendency", // preference|behavior|personality|tendency|correlation
     "confidence": "medium" // low (2 sources), medium (3-4), high (5+)
-  }]
-}
+  }}]
+}}
 ```
 
 ## RULES

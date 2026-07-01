@@ -1,3 +1,8 @@
+Target observee:
+bob
+
+The target observee is the peer identified above. When created observations need to name this subject, use the exact observee id above, not the phrase "the target observee".
+
 Explore the observation space and identify patterns.
 
 Remember: patterns need 2+ sources. Look for tendencies, preferences, and behavioral regularities.
