@@ -47,6 +47,7 @@ pub struct ModelConfig {
     /// as a plain string, matching the backend request builders which thread it
     /// through to the provider param verbatim.
     pub thinking_effort: Option<String>,
+    pub structured_output_mode: Option<StructuredOutputMode>,
     pub max_output_tokens: Option<i64>,
     pub stop_sequences: Option<Vec<String>>,
     /// Free-form provider passthrough merged last into `extra_params`.
@@ -72,6 +73,7 @@ impl ModelConfig {
             seed: None,
             thinking_budget_tokens: None,
             thinking_effort: None,
+            structured_output_mode: None,
             max_output_tokens: None,
             stop_sequences: None,
             provider_params: Map::new(),
@@ -85,16 +87,17 @@ impl ModelConfig {
     /// `SUMMARY_MODEL_CONFIG__TRANSPORT`). Recognized fields: `TRANSPORT`, `MODEL`,
     /// `MAX_OUTPUT_TOKENS`, `TEMPERATURE`, `TOP_P`, `TOP_K`, `FREQUENCY_PENALTY`,
     /// `PRESENCE_PENALTY`, `SEED`, `THINKING_BUDGET_TOKENS`, `THINKING_EFFORT`
-    /// (alias `REASONING_EFFORT`), `BASE_URL`, `API_KEY`. Blank or unparseable
-    /// values leave the existing value untouched.
+    /// (alias `REASONING_EFFORT`), `STRUCTURED_OUTPUT_MODE`, `BASE_URL`,
+    /// `API_KEY`, `PROVIDER_PARAMS`. Blank or unparseable values leave the existing
+    /// value untouched.
     ///
     /// Fallback chains are parsed: `{prefix}__FALLBACK__MODEL` +
     /// `{prefix}__FALLBACK__TRANSPORT` (both required to form a fallback) plus the
     /// same tuning knobs and `{prefix}__FALLBACK__OVERRIDES__{API_KEY,BASE_URL}`
     /// (Python's `FallbackModelSettings.overrides`). `{prefix}__STOP_SEQUENCES`
-    /// (and the fallback's) is a JSON array of strings, matching pydantic-settings'
-    /// JSON decoding of complex env fields. `CACHE_POLICY` and free-form provider
-    /// params are still not parsed here.
+    /// (and the fallback's) is a JSON array of strings and `PROVIDER_PARAMS` is a
+    /// JSON object, matching pydantic-settings' JSON decoding of complex env fields.
+    /// `CACHE_POLICY` is still not parsed here.
     pub fn with_env_overrides(
         mut self,
         values: &std::collections::HashMap<String, String>,
@@ -167,6 +170,12 @@ fn apply_model_knobs(
     if let Some(effort) = get("THINKING_EFFORT").or_else(|| get("REASONING_EFFORT")) {
         config.thinking_effort = Some(effort);
     }
+    if config.transport == Provider::Openai
+        && let Some(mode) =
+            get("STRUCTURED_OUTPUT_MODE").and_then(|m| StructuredOutputMode::parse(&m))
+    {
+        config.structured_output_mode = Some(mode);
+    }
     if let Some(value) = get("MAX_OUTPUT_TOKENS").and_then(|v| v.parse::<i64>().ok()) {
         config.max_output_tokens = Some(value);
     }
@@ -197,6 +206,11 @@ fn apply_model_knobs(
         && let Ok(sequences) = serde_json::from_str::<Vec<String>>(&raw)
     {
         config.stop_sequences = Some(sequences);
+    }
+    if let Some(raw) = get("PROVIDER_PARAMS")
+        && let Ok(Value::Object(params)) = serde_json::from_str::<Value>(&raw)
+    {
+        config.provider_params = params;
     }
 }
 
@@ -281,6 +295,29 @@ pub enum Provider {
     Gemini,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuredOutputMode {
+    JsonSchema,
+    JsonObject,
+}
+
+impl StructuredOutputMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "json_schema" => Some(Self::JsonSchema),
+            "json_object" => Some(Self::JsonObject),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::JsonSchema => "json_schema",
+            Self::JsonObject => "json_object",
+        }
+    }
+}
+
 #[cfg(test)]
 mod env_override_tests {
     use super::*;
@@ -296,7 +333,10 @@ mod env_override_tests {
     #[test]
     fn provider_from_transport_parses_known_values() {
         assert_eq!(Provider::from_transport("OpenAI"), Some(Provider::Openai));
-        assert_eq!(Provider::from_transport("anthropic"), Some(Provider::Anthropic));
+        assert_eq!(
+            Provider::from_transport("anthropic"),
+            Some(Provider::Anthropic)
+        );
         assert_eq!(Provider::from_transport(" gemini "), Some(Provider::Gemini));
         assert_eq!(Provider::from_transport("bedrock"), None);
     }
@@ -317,6 +357,7 @@ mod env_override_tests {
         assert_eq!(config.model, "claude-x");
         assert_eq!(config.max_output_tokens, Some(4096));
         assert_eq!(config.thinking_effort.as_deref(), Some("high"));
+        assert_eq!(config.structured_output_mode, None);
         assert_eq!(config.temperature, Some(0.7));
         assert_eq!(config.base_url.as_deref(), Some("https://relay.example/v1"));
     }
@@ -333,6 +374,18 @@ mod env_override_tests {
         assert_eq!(config.thinking_effort.as_deref(), Some("low"));
         assert_eq!(config.model, "base-model"); // blank ignored
         assert_eq!(config.max_output_tokens, None); // unparseable ignored
+    }
+
+    #[test]
+    fn structured_output_mode_ignored_on_non_openai_transport() {
+        let values = map(&[
+            ("X__TRANSPORT", "anthropic"),
+            ("X__STRUCTURED_OUTPUT_MODE", "json_object"),
+        ]);
+        let config =
+            ModelConfig::new("base-model", Provider::Openai).with_env_overrides(&values, "X");
+        assert_eq!(config.transport, Provider::Anthropic);
+        assert_eq!(config.structured_output_mode, None);
     }
 
     #[test]
@@ -365,26 +418,84 @@ mod env_override_tests {
     }
 
     #[test]
+    fn provider_params_parsed_as_json_object() {
+        let values = map(&[(
+            "X__PROVIDER_PARAMS",
+            r#"{"extra_body":{"reasoning":{"effort":"low"}},"extra_headers":{"X-Test":"1"}}"#,
+        )]);
+        let config =
+            ModelConfig::new("base-model", Provider::Openai).with_env_overrides(&values, "X");
+        assert_eq!(
+            config.provider_params.get("extra_body"),
+            Some(&serde_json::json!({"reasoning": {"effort": "low"}}))
+        );
+        assert_eq!(
+            config.provider_params.get("extra_headers"),
+            Some(&serde_json::json!({"X-Test": "1"}))
+        );
+    }
+
+    #[test]
+    fn provider_params_invalid_or_non_object_json_is_ignored() {
+        let existing = serde_json::json!({"extra_body": {"keep": true}});
+        let mut config = ModelConfig::new("base-model", Provider::Openai);
+        config.provider_params = existing.as_object().unwrap().clone();
+
+        let values = map(&[("X__PROVIDER_PARAMS", r#"["not", "an", "object"]"#)]);
+        let config = config.with_env_overrides(&values, "X");
+        assert_eq!(
+            config.provider_params,
+            existing.as_object().unwrap().clone()
+        );
+
+        let values = map(&[("X__PROVIDER_PARAMS", "not-json")]);
+        let config = config.with_env_overrides(&values, "X");
+        assert_eq!(
+            config.provider_params,
+            existing.as_object().unwrap().clone()
+        );
+    }
+
+    #[test]
     fn fallback_chain_parsed_with_overrides() {
         let values = map(&[
             ("X__MODEL", "gpt-primary"),
             ("X__FALLBACK__MODEL", "claude-backup"),
-            ("X__FALLBACK__TRANSPORT", "anthropic"),
+            ("X__FALLBACK__TRANSPORT", "openai"),
             ("X__FALLBACK__MAX_OUTPUT_TOKENS", "2048"),
             ("X__FALLBACK__THINKING_EFFORT", "low"),
+            ("X__FALLBACK__STRUCTURED_OUTPUT_MODE", "json_schema"),
+            (
+                "X__FALLBACK__PROVIDER_PARAMS",
+                r#"{"extra_query":{"trace":"1"}}"#,
+            ),
             ("X__FALLBACK__OVERRIDES__API_KEY", "sk-fallback"),
-            ("X__FALLBACK__OVERRIDES__BASE_URL", "https://relay.example/v1"),
+            (
+                "X__FALLBACK__OVERRIDES__BASE_URL",
+                "https://relay.example/v1",
+            ),
         ]);
         let config =
             ModelConfig::new("base-model", Provider::Openai).with_env_overrides(&values, "X");
         assert_eq!(config.model, "gpt-primary");
         let fallback = config.fallback.expect("fallback built");
         assert_eq!(fallback.model, "claude-backup");
-        assert_eq!(fallback.transport, Provider::Anthropic);
+        assert_eq!(fallback.transport, Provider::Openai);
         assert_eq!(fallback.max_output_tokens, Some(2048));
         assert_eq!(fallback.thinking_effort.as_deref(), Some("low"));
+        assert_eq!(
+            fallback.structured_output_mode,
+            Some(StructuredOutputMode::JsonSchema)
+        );
+        assert_eq!(
+            fallback.provider_params.get("extra_query"),
+            Some(&serde_json::json!({"trace": "1"}))
+        );
         assert_eq!(fallback.api_key.as_deref(), Some("sk-fallback"));
-        assert_eq!(fallback.base_url.as_deref(), Some("https://relay.example/v1"));
+        assert_eq!(
+            fallback.base_url.as_deref(),
+            Some("https://relay.example/v1")
+        );
         assert!(fallback.fallback.is_none()); // single-level
     }
 
